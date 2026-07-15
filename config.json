@@ -1,0 +1,11 @@
+{
+  "sanctioned_countries": {"KP":"North Korea","IR":"Iran","CU":"Cuba","RU":"Russia","BY":"Belarus"},
+  "watchlist_countries": {"SY":"Syria","MM":"Myanmar (Burma)","CF":"Central African Republic","CD":"Congo (DRC)","SO":"Somalia","YE":"Yemen","VE":"Venezuela","NI":"Nicaragua"},
+  "include_watchlist": false,
+  "crimea_asns": ["AS47541","AS28761","AS35816","AS51764","AS44709","AS206804"],
+  "whitelist_asns": ["AS13335","AS16509","AS15169","AS8075","AS20940","AS54113"],
+  "network_group_name": "OFAC_DENY",
+  "include_ipv6": false,
+  "request_timeout": 30,
+  "request_delay": 0.5
+}
