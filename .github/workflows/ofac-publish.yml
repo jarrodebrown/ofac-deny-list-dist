@@ -58,7 +58,7 @@ jobs:
           sha256sum ofac_deny.ipset | awk '{print $1}' > ofac_deny.ipset.sha256
           echo "COUNT=$COUNT" >> "$GITHUB_ENV"
 
-      - name: Sign the ipset (Ed25519)
+      - name: Sign the ipset (ECDSA P-256 / SHA-256)
         env:
           DENYLIST_SIGNING_KEY: ${{ secrets.DENYLIST_SIGNING_KEY }}
         run: |
@@ -66,12 +66,12 @@ jobs:
           if [ -z "${DENYLIST_SIGNING_KEY:-}" ]; then
             echo "::warning::no DENYLIST_SIGNING_KEY secret — publishing unsigned"; exit 0
           fi
-          # Rebuild a clean PEM whether the secret holds the full PEM or just the base64 body.
-          BODY=$(printf '%s' "$DENYLIST_SIGNING_KEY" | grep -vE 'BEGIN|END' | tr -d ' \n\r')
-          printf -- '-----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----\n' "$BODY" > signing.key
-          openssl pkeyutl -sign -inkey signing.key -rawin -in ofac_deny.ipset -out ofac_deny.ipset.sig
+          # ECDSA P-256 + SHA-256 via `dgst` — verifiable by the router's openssl 1.1.1
+          # (Ed25519 pkeyutl -rawin is 3.0-only, so it can't be used on the EdgeRouter).
+          printf '%s\n' "$DENYLIST_SIGNING_KEY" > signing.key
+          openssl dgst -sha256 -sign signing.key -out ofac_deny.ipset.sig ofac_deny.ipset
           rm -f signing.key
-          echo "signed ($(wc -c < ofac_deny.ipset.sig) byte signature)"
+          echo "signed ($(wc -c < ofac_deny.ipset.sig) byte ECDSA signature)"
 
       - name: Publish rolling Release
         env:
