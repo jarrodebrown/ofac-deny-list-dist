@@ -1,21 +1,18 @@
 name: Publish OFAC deny list
 
-# Regenerates the OFAC deny list from public sources (Treasury OFAC CSVs +
-# ipdeny country blocks) and publishes it as an ipset add-list on a rolling
-# GitHub Release. The EdgeRouter pulls this asset daily (see
-# router/ofac-pull.sh), verifies the checksum, and reloads it into the
-# OFAC_DENY ipset — no laptop involved.
-#
-# The deny list is derived entirely from public data, so the Release is public
-# and the router needs no credentials to fetch it.
+# Regenerates the deny list from public sources — Treasury OFAC CSVs + ipdeny
+# country blocks, PLUS extra public threat feeds (FireHOL, Spamhaus DROP/EDROP,
+# abuse.ch Feodo, Tor exit nodes) — and publishes it as an ipset add-list on a
+# rolling GitHub Release. The EdgeRouter pulls this daily, verifies the checksum,
+# and reloads it into the OFAC_DENY set. All public data, so no credentials.
 
 on:
   schedule:
     - cron: "0 8 * * *"      # daily at 08:00 UTC
-  workflow_dispatch: {}       # allow manual runs
+  workflow_dispatch: {}
 
 permissions:
-  contents: write             # needed to create/update the Release
+  contents: write
 
 concurrency:
   group: ofac-publish
@@ -24,7 +21,7 @@ concurrency:
 env:
   IPSET_NAME: OFAC_DENY
   RELEASE_TAG: deny-list
-  MIN_ENTRIES: "5000"         # safety floor: refuse to publish a suspiciously small list
+  MIN_ENTRIES: "5000"
 
 jobs:
   build-and-publish:
@@ -43,13 +40,17 @@ jobs:
           python3 ofac_deny_list.py --output-dir deny_lists
           test -f deny_lists/combined_deny.txt
 
+      - name: Add extra public threat feeds
+        run: bash extra_feeds.sh deny_lists/combined_deny.txt
+
       - name: Build ipset add-list + checksum, with sanity gate
         run: |
           set -euo pipefail
-          awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/ {print "add '"$IPSET_NAME"' " $0}' \
-            deny_lists/combined_deny.txt > ofac_deny.ipset
+          # Extract all CIDR lines (OFAC + feeds), dedupe, then build add-lines.
+          grep -oE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' deny_lists/combined_deny.txt \
+            | sort -u | awk -v s="$IPSET_NAME" '{print "add " s " " $0}' > ofac_deny.ipset
           COUNT=$(wc -l < ofac_deny.ipset | tr -d ' ')
-          echo "Generated $COUNT prefixes"
+          echo "Generated $COUNT unique prefixes (OFAC + feeds)"
           if [ "$COUNT" -lt "$MIN_ENTRIES" ]; then
             echo "::error::Only $COUNT prefixes (< $MIN_ENTRIES floor) — refusing to publish a possibly-truncated list"
             exit 1
@@ -62,7 +63,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          NOTES="Auto-generated $(date -u '+%Y-%m-%d %H:%M UTC') — ${COUNT} prefixes. Consumed by the EdgeRouter daily pull (checksum-verified)."
+          NOTES="Auto-generated $(date -u '+%Y-%m-%d %H:%M UTC') — ${COUNT} prefixes (OFAC + public threat feeds). Consumed by the EdgeRouter daily pull (checksum-verified)."
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" ofac_deny.ipset ofac_deny.ipset.sha256 --clobber
             gh release edit "$RELEASE_TAG" --notes "$NOTES"
