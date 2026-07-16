@@ -1,0 +1,76 @@
+name: Publish DNS blocklist
+
+# Builds a dnsmasq DNS sinkhole blocklist (hosts format, "0.0.0.0 domain") from
+# public malware / C2 DOMAIN feeds and publishes it as a signed, rolling GitHub
+# Release. The EdgeRouter pulls it daily, verifies sha256 + ECDSA signature, and
+# loads it as a dnsmasq addn-hosts file (SIGHUP reload). All public data.
+#
+# Mirrors ofac-publish.yml (same signing key), but for domains instead of IPs.
+
+on:
+  schedule:
+    - cron: "20 8 * * *"      # daily at 08:20 UTC (20 min after the ipset publish)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dns-publish
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: dns-blocklist
+  MIN_ENTRIES: "1000"
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build DNS blocklist from public malware/C2 feeds
+        run: |
+          set -euo pipefail
+          bash dns_feeds.sh dns_blocklist.hosts
+          COUNT=$(wc -l < dns_blocklist.hosts | tr -d ' ')
+          echo "Generated $COUNT sinkhole domains"
+          if [ "$COUNT" -lt "$MIN_ENTRIES" ]; then
+            echo "::error::Only $COUNT domains (< $MIN_ENTRIES floor) — refusing to publish a possibly-truncated list"
+            exit 1
+          fi
+          sha256sum dns_blocklist.hosts | awk '{print $1}' > dns_blocklist.hosts.sha256
+          echo "COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      - name: Sign the blocklist (ECDSA P-256 / SHA-256)
+        env:
+          DENYLIST_SIGNING_KEY: ${{ secrets.DENYLIST_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DENYLIST_SIGNING_KEY:-}" ]; then
+            echo "::warning::no DENYLIST_SIGNING_KEY secret — publishing unsigned"; exit 0
+          fi
+          # Same ECDSA P-256 + SHA-256 via `dgst` the router already verifies for
+          # the ipset (openssl 1.1.1-compatible).
+          printf '%s\n' "$DENYLIST_SIGNING_KEY" > signing.key
+          openssl dgst -sha256 -sign signing.key -out dns_blocklist.hosts.sig dns_blocklist.hosts
+          rm -f signing.key
+          echo "signed ($(wc -c < dns_blocklist.hosts.sig) byte ECDSA signature)"
+
+      - name: Publish rolling Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NOTES="Auto-generated $(date -u '+%Y-%m-%d %H:%M UTC') — ${COUNT} malware/C2 domains. Consumed by the EdgeRouter daily DNS pull (sha256 + signature verified)."
+          ASSETS="dns_blocklist.hosts dns_blocklist.hosts.sha256"
+          [ -f dns_blocklist.hosts.sig ] && ASSETS="$ASSETS dns_blocklist.hosts.sig"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" $ASSETS --clobber
+            gh release edit "$RELEASE_TAG" --notes "$NOTES"
+          else
+            gh release create "$RELEASE_TAG" $ASSETS \
+              --title "DNS blocklist (rolling)" --notes "$NOTES"
+          fi
+          echo "Published: https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/dns_blocklist.hosts"
