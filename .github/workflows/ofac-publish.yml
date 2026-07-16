@@ -58,17 +58,34 @@ jobs:
           sha256sum ofac_deny.ipset | awk '{print $1}' > ofac_deny.ipset.sha256
           echo "COUNT=$COUNT" >> "$GITHUB_ENV"
 
+      - name: Sign the ipset (Ed25519)
+        env:
+          DENYLIST_SIGNING_KEY: ${{ secrets.DENYLIST_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DENYLIST_SIGNING_KEY:-}" ]; then
+            echo "::warning::no DENYLIST_SIGNING_KEY secret — publishing unsigned"; exit 0
+          fi
+          # Rebuild a clean PEM whether the secret holds the full PEM or just the base64 body.
+          BODY=$(printf '%s' "$DENYLIST_SIGNING_KEY" | grep -vE 'BEGIN|END' | tr -d ' \n\r')
+          printf -- '-----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----\n' "$BODY" > signing.key
+          openssl pkeyutl -sign -inkey signing.key -rawin -in ofac_deny.ipset -out ofac_deny.ipset.sig
+          rm -f signing.key
+          echo "signed ($(wc -c < ofac_deny.ipset.sig) byte signature)"
+
       - name: Publish rolling Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           NOTES="Auto-generated $(date -u '+%Y-%m-%d %H:%M UTC') — ${COUNT} prefixes (OFAC + public threat feeds). Consumed by the EdgeRouter daily pull (checksum-verified)."
+          ASSETS="ofac_deny.ipset ofac_deny.ipset.sha256"
+          [ -f ofac_deny.ipset.sig ] && ASSETS="$ASSETS ofac_deny.ipset.sig"
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" ofac_deny.ipset ofac_deny.ipset.sha256 --clobber
+            gh release upload "$RELEASE_TAG" $ASSETS --clobber
             gh release edit "$RELEASE_TAG" --notes "$NOTES"
           else
-            gh release create "$RELEASE_TAG" ofac_deny.ipset ofac_deny.ipset.sha256 \
+            gh release create "$RELEASE_TAG" $ASSETS \
               --title "OFAC deny list (rolling)" --notes "$NOTES"
           fi
           echo "Published: https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/ofac_deny.ipset"
