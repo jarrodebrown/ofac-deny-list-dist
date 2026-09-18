@@ -89,3 +89,23 @@ jobs:
               --title "OFAC deny list (rolling)" --notes "$NOTES"
           fi
           echo "Published: https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/ofac_deny.ipset"
+
+      - name: Record run (rolling 7-day activity log)
+        # Keeps the repo from going 60 days without a commit, which is what
+        # actually trips GitHub's scheduled-workflow auto-disable — the Release
+        # publish above doesn't count as repo activity on its own. Rolling
+        # tail -n 14 keeps this at ~14 lines (7 days x 2 daily workflows) forever.
+        run: |
+          set -euo pipefail
+          echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") ofac-publish" >> last-run.txt
+          tail -n 14 last-run.txt > last-run.tmp && mv last-run.tmp last-run.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last-run.txt
+          if git diff --cached --quiet; then
+            echo "no change to last-run.txt"
+          else
+            git commit -m "chore: record ofac-publish run"
+            git pull --rebase origin main
+            git push
+          fi
