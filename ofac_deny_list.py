@@ -94,6 +94,8 @@ DEFAULT_CONFIG = {
     # Performance
     "request_timeout": 30,
     "request_delay": 0.5,  # seconds between HTTP requests
+    "fetch_retries": 4,  # total attempts per URL
+    "fetch_retry_backoff": 2,  # seconds; doubles each retry (2, 4, 8)
     "include_ipv6": False,  # set True to also fetch IPv6 blocks
     "user_agent": "OFAC-Deny-List/1.0 (network security tool)",
 }
@@ -120,26 +122,46 @@ def setup_logging(log_dir):
 # HTTP helper
 # ---------------------------------------------------------------------------
 def fetch_url(url, config, description="resource"):
-    """Fetch a URL with proper headers and error handling."""
+    """Fetch a URL with proper headers, retries and error handling.
+
+    Retries with exponential backoff on network errors, HTTP 429/5xx, and
+    empty response bodies (some upstreams intermittently return 200 with no
+    content). Other HTTP 4xx errors are not retried. Returns None once all
+    attempts are exhausted, so callers keep their existing failure handling.
+    """
     headers = {"User-Agent": config.get("user_agent", DEFAULT_CONFIG["user_agent"])}
     timeout = config.get("request_timeout", DEFAULT_CONFIG["request_timeout"])
+    attempts = max(1, int(config.get("fetch_retries", DEFAULT_CONFIG["fetch_retries"])))
+    backoff = config.get("fetch_retry_backoff", DEFAULT_CONFIG["fetch_retry_backoff"])
 
     logging.info(f"Fetching {description}: {url}")
-    try:
-        req = Request(url, headers=headers)
-        with urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
-            logging.info(f"  -> {len(data)} bytes received")
-            return data.decode("utf-8", errors="replace")
-    except HTTPError as e:
-        logging.error(f"HTTP error fetching {url}: {e.code} {e.reason}")
-        return None
-    except URLError as e:
-        logging.error(f"URL error fetching {url}: {e.reason}")
-        return None
-    except Exception as e:
-        logging.error(f"Error fetching {url}: {e}")
-        return None
+    for attempt in range(1, attempts + 1):
+        reason = None
+        try:
+            req = Request(url, headers=headers)
+            with urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+                logging.info(f"  -> {len(data)} bytes received")
+                if data.strip():
+                    return data.decode("utf-8", errors="replace")
+                reason = "empty response body"
+        except HTTPError as e:
+            reason = f"HTTP error {e.code} {e.reason}"
+            if e.code != 429 and e.code < 500:
+                logging.error(f"{reason} fetching {url} (not retrying)")
+                return None
+        except URLError as e:
+            reason = f"URL error {e.reason}"
+        except Exception as e:
+            reason = f"error {e}"
+
+        if attempt < attempts:
+            delay = backoff * (2 ** (attempt - 1))
+            logging.warning(f"  attempt {attempt}/{attempts} for {url} failed: {reason}; retrying in {delay}s")
+            time.sleep(delay)
+        else:
+            logging.error(f"Giving up on {url} after {attempts} attempts: {reason}")
+    return None
 
 
 # ---------------------------------------------------------------------------
